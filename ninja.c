@@ -8,7 +8,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define PORT 55552
+#define PORT 55555
 #define BUFFER_SIZE 1024
 #define MAX_USERNAME 16
 #define MAX_ROOM 6
@@ -32,29 +32,34 @@ void* receive_messages(void* arg) {
 }
 
 int main() {
-    char username[MAX_USERNAME], room[MAX_ROOM], password[MAX_PASS], choice[2];
-    printf("Enter your username: ");
+    char username[MAX_USERNAME], room[MAX_ROOM], public_pass[MAX_PASS], owner_pass[MAX_PASS], choice[2];
+    printf("Enter your username (e.g., ninja-Bojo): ");
     fgets(username, MAX_USERNAME, stdin);
     username[strcspn(username, "\n")] = 0;
+
+    if (strncmp(username, "ninja-", 6) != 0) {
+        printf("Username must start with 'ninja-'\n");
+        return 1;
+    }
 
     printf("Do you have a room or want to join one? (1 = Have a room, 2 = Join existing): ");
     fgets(choice, sizeof(choice) + 1, stdin);
     choice[strcspn(choice, "\n")] = 0;
 
+    printf("Enter your room number: ");
+    fgets(room, MAX_ROOM, stdin);
+    room[strcspn(room, "\n")] = 0;
+
     if (choice[0] == '1') {
-        printf("Enter your room number: ");
-        fgets(room, MAX_ROOM, stdin);
-        room[strcspn(room, "\n")] = 0;
         printf("Enter your owner password: ");
-        fgets(password, MAX_PASS, stdin);
-        password[strcspn(password, "\n")] = 0;
+        fgets(owner_pass, MAX_PASS, stdin);
+        owner_pass[strcspn(owner_pass, "\n")] = 0;
+        strcpy(public_pass, ""); // Owner doesn’t need public pass
     } else if (choice[0] == '2') {
-        printf("Enter the room number: ");
-        fgets(room, MAX_ROOM, stdin);
-        room[strcspn(room, "\n")] = 0;
-        printf("Enter the room password: ");
-        fgets(password, MAX_PASS, stdin);
-        password[strcspn(password, "\n")] = 0;
+        printf("Enter the room public password: ");
+        fgets(public_pass, MAX_PASS, stdin);
+        public_pass[strcspn(public_pass, "\n")] = 0;
+        strcpy(owner_pass, ""); // Non-owner doesn’t need owner pass
     } else {
         printf("Invalid choice\n");
         return 1;
@@ -69,7 +74,7 @@ int main() {
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
-    struct hostent* host = gethostbyname("127.0.0.1"); // Replace with VPS IP later
+    struct hostent* host = gethostbyname("YOUR_VPS_IP"); // Replace with your VPS IP
     if (host == NULL) {
         perror("Host resolution failed");
         exit(1);
@@ -81,9 +86,8 @@ int main() {
         exit(1);
     }
 
-    // Send username:room:is_owner (no password check here; bot handles it)
     char init_msg[BUFFER_SIZE];
-    snprintf(init_msg, sizeof(init_msg), "%s:%s:%d", username, room, choice[0] == '1');
+    snprintf(init_msg, sizeof(init_msg), "%s:%s:%s:%s:%d", username, room, public_pass, owner_pass, choice[0] == '1');
     send(sockfd, init_msg, strlen(init_msg), 0);
 
     pthread_t recv_thread;
@@ -93,7 +97,7 @@ int main() {
     char buffer[BUFFER_SIZE];
     while (1) {
         if (fgets(buffer, BUFFER_SIZE, stdin) == NULL) break;
-        send(sockfd, buffer, strlen(buffer), 0);
+        send(sockfd, buffer, strlen(buffer), 0);§    
     }
 
     close(sockfd);
