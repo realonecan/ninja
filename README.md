@@ -1,6 +1,16 @@
-# Ninja Chat
-1. Message @NinjaChatBot on Telegram for a username or room.
-2. Install:
-   - macOS: `brew install yourusername/ninja/ninja`
-   - Linux: `sudo bash install-ninja.sh`
-3. Run: `ninja`
+# Ninja Chat 🥷💬
+
+Anonymous terminal-based chat system using a Telegram bot for credential generation and a TCP C-based server for real-time communication.
+
+---
+
+## 🚀 How It Works
+
+1. Use [@NinjaChatBot](https://t.me/NinjaChatBot) to generate:
+   - A **random username**
+   - A **room ID**
+   - Public and owner passwords
+
+2. Run the client using:
+```bash
+ninja
