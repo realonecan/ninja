@@ -3,103 +3,169 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+#include <ncurses.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include "user_auth.h"
 
 #define PORT 55555
 #define BUFFER_SIZE 1024
-#define MAX_USERNAME 16
-#define MAX_ROOM 6
-#define MAX_PASS 16
 
+SSL* ssl;
 int sockfd;
 
 void* receive_messages(void* arg) {
     char buffer[BUFFER_SIZE];
     while (1) {
-        int bytes = recv(sockfd, buffer, BUFFER_SIZE - 1, 0);
-        if (bytes <= 0) {
-            printf("Disconnected\n");
-            close(sockfd);
-            exit(0);
-        }
+        int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+        if (bytes <= 0) break;
         buffer[bytes] = '\0';
-        printf("%s", buffer);
+        mvprintw(14, 2, "%s", buffer);
+        refresh();
     }
     return NULL;
 }
 
 int main() {
-    char username[MAX_USERNAME], room[MAX_ROOM], public_pass[MAX_PASS], owner_pass[MAX_PASS], choice[2];
-    printf("Enter your username (e.g., ninja-Bojo): ");
-    fgets(username, MAX_USERNAME, stdin);
-    username[strcspn(username, "\n")] = 0;
+    char username[64], password[64], confirm[64];
+    char room[16], public_pass[32], owner_pass[32];
 
-    if (strncmp(username, "ninja-", 6) != 0) {
-        printf("Username must start with 'ninja-'\n");
-        return 1;
-    }
+    // Init ncurses
+    initscr();
+    noecho();
+    cbreak();
 
-    printf("Do you have a room or want to join one? (1 = Have a room, 2 = Join existing): ");
-    fgets(choice, sizeof(choice) + 1, stdin);
-    choice[strcspn(choice, "\n")] = 0;
+    mvprintw(2, 2, "Welcome to Ninja Chat 🔒");
+    mvprintw(4, 2, "1. Register");
+    mvprintw(5, 2, "2. Login");
+    mvprintw(6, 2, "Choose option: ");
+    refresh();
 
-    printf("Enter your room number: ");
-    fgets(room, MAX_ROOM, stdin);
-    room[strcspn(room, "\n")] = 0;
+    echo();
+    char opt = getch();
+    noecho();
+    clear();
 
-    if (choice[0] == '1') {
-        printf("Enter your owner password: ");
-        fgets(owner_pass, MAX_PASS, stdin);
-        owner_pass[strcspn(owner_pass, "\n")] = 0;
-        strcpy(public_pass, ""); // Owner doesn’t need public pass
-    } else if (choice[0] == '2') {
-        printf("Enter the room public password: ");
-        fgets(public_pass, MAX_PASS, stdin);
-        public_pass[strcspn(public_pass, "\n")] = 0;
-        strcpy(owner_pass, ""); // Non-owner doesn’t need owner pass
+    mvprintw(2, 2, "Username (no 'ninja-' prefix): ");
+    echo(); getnstr(username, 50); noecho();
+
+    mvprintw(3, 2, "Password: ");
+    echo(); getnstr(password, 50); noecho();
+
+    if (opt == '1') {
+        mvprintw(4, 2, "Confirm password: ");
+        echo(); getnstr(confirm, 50); noecho();
+
+        if (strcmp(password, confirm) != 0) {
+            mvprintw(6, 2, "❌ Passwords do not match! Press any key to continue...");
+            getch(); endwin(); return 1;
+        }
+
+        if (register_user(username, password)) {
+            mvprintw(6, 2, "✅ Registered successfully! Press any key to continue...");
+        } else {
+            mvprintw(6, 2, "❌ Username already exists! Press any key to continue...");
+            getch(); endwin(); return 1;
+        }
+    } else if (opt == '2') {
+        if (!login_user(username, password)) {
+            mvprintw(6, 2, "❌ Invalid credentials! Press any key to continue...");
+            getch(); endwin(); return 1;
+        }
+        mvprintw(6, 2, "✅ Login successful! Press any key to continue...");
     } else {
-        printf("Invalid choice\n");
-        return 1;
+        mvprintw(6, 2, "🚧 Feature under development. Press any key to continue...");
+        getch(); endwin(); return 1;
     }
+
+    getch(); clear();
+
+    mvprintw(2, 2, "Do you want to:");
+    mvprintw(3, 4, "1 - Create a Room");
+    mvprintw(4, 4, "2 - Join Existing Room");
+    mvprintw(5, 2, "Enter choice: ");
+    refresh();
+    echo();
+    char choice = getch();
+    noecho();
+    int is_owner = (choice == '1');
+
+    clear();
+    mvprintw(2, 2, "Room number: ");
+    echo(); getnstr(room, 15); noecho();
+
+    if (is_owner) {
+        mvprintw(3, 2, "Set room owner password: ");
+        echo(); getnstr(owner_pass, 31); noecho();
+        strcpy(public_pass, "");
+    } else {
+        mvprintw(3, 2, "Enter room public password: ");
+        echo(); getnstr(public_pass, 31); noecho();
+        strcpy(owner_pass, "");
+    }
+
+    char full_username[64] = "ninja-";
+    strcat(full_username, username);
+
+    // === Initialize SSL ===
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    const SSL_METHOD* method = TLS_client_method();
+    SSL_CTX* ctx = SSL_CTX_new(method);
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("Socket creation failed");
-        exit(1);
+    struct sockaddr_in server_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(PORT)
+    };
+    inet_pton(AF_INET, "16.171.198.136", &server_addr.sin_addr);
+
+    connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sockfd);
+    SSL_connect(ssl);
+
+    // Send formatted login info
+    char login_data[BUFFER_SIZE];
+    snprintf(login_data, sizeof(login_data), "%s:%s:%s:%s:%d", 
+             full_username, room, public_pass, owner_pass, is_owner);
+    SSL_write(ssl, login_data, strlen(login_data));
+
+    char response[BUFFER_SIZE];
+    int bytes = SSL_read(ssl, response, sizeof(response) - 1);
+    response[bytes] = '\0';
+
+    if (strcmp(response, "WAITING_APPROVAL") == 0) {
+        mvprintw(8, 2, "Waiting for room owner approval..."); refresh();
+        bytes = SSL_read(ssl, response, sizeof(response) - 1);
+        response[bytes] = '\0';
     }
 
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-    struct hostent* host = gethostbyname("YOUR_VPS_IP"); // Replace with your VPS IP
-    if (host == NULL) {
-        perror("Host resolution failed");
-        exit(1);
+    if (strcmp(response, "APPROVED") == 0) {
+        mvprintw(10, 2, "✅ Approved! You can now chat.");
+    } else {
+        mvprintw(10, 2, "❌ Access denied.");
+        refresh();
+        getch(); endwin(); return 0;
     }
-    server_addr.sin_addr = *((struct in_addr*)host->h_addr);
-
-    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Connection failed");
-        exit(1);
-    }
-
-    char init_msg[BUFFER_SIZE];
-    snprintf(init_msg, sizeof(init_msg), "%s:%s:%s:%s:%d", username, room, public_pass, owner_pass, choice[0] == '1');
-    send(sockfd, init_msg, strlen(init_msg), 0);
 
     pthread_t recv_thread;
     pthread_create(&recv_thread, NULL, receive_messages, NULL);
     pthread_detach(recv_thread);
 
-    char buffer[BUFFER_SIZE];
+    char msg[BUFFER_SIZE];
     while (1) {
-        if (fgets(buffer, BUFFER_SIZE, stdin) == NULL) break;
-        send(sockfd, buffer, strlen(buffer), 0);§    
+        move(16, 2); clrtoeol(); echo();
+        getnstr(msg, BUFFER_SIZE - 1); noecho();
+        SSL_write(ssl, msg, strlen(msg));
     }
 
+    endwin();
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
     close(sockfd);
     return 0;
 }
