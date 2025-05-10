@@ -1,3 +1,4 @@
+// ninja.c – ncurses TLS client
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,162 +11,122 @@
 #include <openssl/err.h>
 #include "user_auth.h"
 
-#define PORT 55555
-#define BUFFER_SIZE 1024
+#define PORT         55555
+#define BUFFER_SIZE  1024
 
-SSL* ssl;
-int sockfd;
+static SSL       *ssl;
+static int        sockfd;
+static pthread_mutex_t scr_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void* receive_messages(void* arg) {
-    char buffer[BUFFER_SIZE];
+/* ─── receive thread ─── */
+static void *receiver(void *arg)
+{
+    char buf[BUFFER_SIZE];
+    (void)arg;
     while (1) {
-        int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
-        if (bytes <= 0) break;
-        buffer[bytes] = '\0';
-        mvprintw(14, 2, "%s", buffer);
-        refresh();
+        int n = SSL_read(ssl, buf, sizeof(buf) - 1);
+        if (n <= 0) break;
+        buf[n] = '\0';
+
+        pthread_mutex_lock(&scr_lock);
+        mvprintw(14, 2, "%s", buf);
+        clrtoeol(); refresh();
+        pthread_mutex_unlock(&scr_lock);
     }
     return NULL;
 }
 
-int main() {
+/* ─── main ─── */
+int main(int argc, char **argv)
+{
+    /* ─ ncurses init ─ */
+    initscr(); noecho(); cbreak();
+
     char username[64], password[64], confirm[64];
-    char room[16], public_pass[32], owner_pass[32];
+    char room[16], pub_pass[32], owner_pass[32];
 
-    // Init ncurses
-    initscr();
-    noecho();
-    cbreak();
+    mvprintw(2,2,"Welcome to Ninja Chat 🔒");
+    mvprintw(4,2,"1. Register");
+    mvprintw(5,2,"2. Login");
+    mvprintw(6,2,"Choose option: "); refresh();
+    echo(); char opt = getch(); noecho(); clear();
 
-    mvprintw(2, 2, "Welcome to Ninja Chat 🔒");
-    mvprintw(4, 2, "1. Register");
-    mvprintw(5, 2, "2. Login");
-    mvprintw(6, 2, "Choose option: ");
-    refresh();
+    mvprintw(2,2,"Username (no 'ninja-' prefix): ");
+    echo(); getnstr(username,50); noecho();
+    mvprintw(3,2,"Password: "); echo(); getnstr(password,50); noecho();
 
-    echo();
-    char opt = getch();
-    noecho();
+    if (opt == '1') {                             /*  register  */
+        mvprintw(4,2,"Confirm password: "); echo(); getnstr(confirm,50); noecho();
+        if (strcmp(password, confirm)) { mvprintw(6,2,"❌ Mismatch!"); getch(); endwin(); return 0; }
+        int ok = register_user(username, password);
+        mvprintw(6,2, ok==1 ? "✅ Registered." : "❌ User exists."); getch();
+    } else if (opt == '2') {                      /*  login  */
+        int ok = login_user(username, password);
+        mvprintw(6,2, ok ? "✅ Login OK." : "❌ Wrong creds."); getch();
+        if (!ok){ endwin(); return 0; }
+    } else { endwin(); return 0; }
+
+    /* clear password from RAM */
+    explicit_bzero(password, sizeof(password));
+    explicit_bzero(confirm, sizeof(confirm));
+
     clear();
-
-    mvprintw(2, 2, "Username (no 'ninja-' prefix): ");
-    echo(); getnstr(username, 50); noecho();
-
-    mvprintw(3, 2, "Password: ");
-    echo(); getnstr(password, 50); noecho();
-
-    if (opt == '1') {
-        mvprintw(4, 2, "Confirm password: ");
-        echo(); getnstr(confirm, 50); noecho();
-
-        if (strcmp(password, confirm) != 0) {
-            mvprintw(6, 2, "❌ Passwords do not match! Press any key to continue...");
-            getch(); endwin(); return 1;
-        }
-
-        if (register_user(username, password)) {
-            mvprintw(6, 2, "✅ Registered successfully! Press any key to continue...");
-        } else {
-            mvprintw(6, 2, "❌ Username already exists! Press any key to continue...");
-            getch(); endwin(); return 1;
-        }
-    } else if (opt == '2') {
-        if (!login_user(username, password)) {
-            mvprintw(6, 2, "❌ Invalid credentials! Press any key to continue...");
-            getch(); endwin(); return 1;
-        }
-        mvprintw(6, 2, "✅ Login successful! Press any key to continue...");
-    } else {
-        mvprintw(6, 2, "🚧 Feature under development. Press any key to continue...");
-        getch(); endwin(); return 1;
-    }
-
-    getch(); clear();
-
-    mvprintw(2, 2, "Do you want to:");
-    mvprintw(3, 4, "1 - Create a Room");
-    mvprintw(4, 4, "2 - Join Existing Room");
-    mvprintw(5, 2, "Enter choice: ");
-    refresh();
-    echo();
-    char choice = getch();
-    noecho();
+    mvprintw(2,2,"1-Create room   2-Join"); refresh();
+    echo(); char choice = getch(); noecho();
     int is_owner = (choice == '1');
 
     clear();
-    mvprintw(2, 2, "Room number: ");
-    echo(); getnstr(room, 15); noecho();
-
+    mvprintw(2,2,"Room number: "); echo(); getnstr(room,15); noecho();
     if (is_owner) {
-        mvprintw(3, 2, "Set room owner password: ");
-        echo(); getnstr(owner_pass, 31); noecho();
-        strcpy(public_pass, "");
+        mvprintw(3,2,"Owner password: "); echo(); getnstr(owner_pass,31); noecho();
+        pub_pass[0]='\0';
     } else {
-        mvprintw(3, 2, "Enter room public password: ");
-        echo(); getnstr(public_pass, 31); noecho();
-        strcpy(owner_pass, "");
+        mvprintw(3,2,"Public password: "); echo(); getnstr(pub_pass,31); noecho();
+        owner_pass[0]='\0';
     }
 
-    char full_username[64] = "ninja-";
-    strcat(full_username, username);
+    /* ─ TLS init ─ */
+    SSL_library_init(); SSL_load_error_strings(); OpenSSL_add_all_algorithms();
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
 
-    // === Initialize SSL ===
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
-    const SSL_METHOD* method = TLS_client_method();
-    SSL_CTX* ctx = SSL_CTX_new(method);
+    /* Load & verify CA (assumes cert.pem from server copied as ca.pem) */
+    SSL_CTX_load_verify_locations(ctx, "ca.pem", NULL);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in server_addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(PORT)
-    };
-    inet_pton(AF_INET, "16.171.198.136", &server_addr.sin_addr);
+    struct sockaddr_in srv = {.sin_family=AF_INET, .sin_port=htons(PORT)};
+    const char *addr = argc>1 ? argv[1] : getenv("NINJA_SERVER");
+    if (!addr) addr = "127.0.0.1";
+    inet_pton(AF_INET, addr, &srv.sin_addr);
+    connect(sockfd, (void *)&srv, sizeof(srv));
 
-    connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr));
-    ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sockfd);
-    SSL_connect(ssl);
+    ssl = SSL_new(ctx); SSL_set_fd(ssl, sockfd);
+    if (SSL_connect(ssl) <= 0) { ERR_print_errors_fp(stderr); endwin(); return 0; }
 
-    // Send formatted login info
-    char login_data[BUFFER_SIZE];
-    snprintf(login_data, sizeof(login_data), "%s:%s:%s:%s:%d", 
-             full_username, room, public_pass, owner_pass, is_owner);
-    SSL_write(ssl, login_data, strlen(login_data));
+    /* send login packet */
+    char full_user[64] = "ninja-"; strcat(full_user, username);
+    char login[BUFFER_SIZE];
+    snprintf(login,sizeof(login),"%s:%s:%s:%s:%d",
+             full_user, room, pub_pass, owner_pass, is_owner);
+    SSL_write(ssl, login, strlen(login));
 
-    char response[BUFFER_SIZE];
-    int bytes = SSL_read(ssl, response, sizeof(response) - 1);
-    response[bytes] = '\0';
-
-    if (strcmp(response, "WAITING_APPROVAL") == 0) {
-        mvprintw(8, 2, "Waiting for room owner approval..."); refresh();
-        bytes = SSL_read(ssl, response, sizeof(response) - 1);
-        response[bytes] = '\0';
+    char resp[BUFFER_SIZE]; int n = SSL_read(ssl, resp, sizeof(resp)-1);
+    resp[n]='\0';
+    if (!strcmp(resp,"WAITING_APPROVAL")) {
+        mvprintw(8,2,"Waiting approval…"); refresh();
+        n = SSL_read(ssl, resp, sizeof(resp)-1); resp[n]='\0';
     }
+    if (strcmp(resp,"APPROVED")) { mvprintw(10,2,"❌ Access denied"); getch(); endwin(); return 0; }
 
-    if (strcmp(response, "APPROVED") == 0) {
-        mvprintw(10, 2, "✅ Approved! You can now chat.");
-    } else {
-        mvprintw(10, 2, "❌ Access denied.");
-        refresh();
-        getch(); endwin(); return 0;
-    }
+    pthread_t tid; pthread_create(&tid,NULL,receiver,NULL); pthread_detach(tid);
 
-    pthread_t recv_thread;
-    pthread_create(&recv_thread, NULL, receive_messages, NULL);
-    pthread_detach(recv_thread);
-
+    /* ─ chat loop ─ */
     char msg[BUFFER_SIZE];
     while (1) {
-        move(16, 2); clrtoeol(); echo();
-        getnstr(msg, BUFFER_SIZE - 1); noecho();
+        pthread_mutex_lock(&scr_lock);
+        move(16,2); clrtoeol(); echo();
+        getnstr(msg, BUFFER_SIZE-1); noecho();
+        pthread_mutex_unlock(&scr_lock);
         SSL_write(ssl, msg, strlen(msg));
     }
-
-    endwin();
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    close(sockfd);
-    return 0;
 }
